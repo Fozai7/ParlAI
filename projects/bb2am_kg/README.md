@@ -1,10 +1,7 @@
 ## Command to interact with the model
 ```bash
-python3 -m parlai interactive --model projects.bb2am.agents.blenderbot2:BlenderBot2FidAgent \
---model-file zoo:blenderbot2/blenderbot2_400M/model --search_server 0.0.0.0:8080 --loglevel debug
-
-python3 -m parlai interactive --model projects.bb2am.agents.blenderbot2:BlenderBot2FidAgent \
---model-file zoo:blenderbot2/blenderbot2_3B/model --search_server 0.0.0.0:8080 --loglevel debug
+python3 -m parlai interactive --model projects.bb2am_kg.agents.blenderbot2:BlenderBot2FidAgent \
+--model-file projects/bb2am_kg/bb2_model/model --search_server 0.0.0.0:8080 --loglevel debug
 ```
 In another terminal, run the following command to start the search server
 ```bash

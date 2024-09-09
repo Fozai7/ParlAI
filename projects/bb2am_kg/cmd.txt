@@ -1,0 +1,26 @@
+parlai train_model -dp data \
+--model projects.blenderbot2.agents.blenderbot2:BlenderBot2FidAgent \
+--task hotpotqa,coqa,blended_skill_talk,wizard_of_internet,twitter \
+--num_epochs 1 \
+--memory-decoder-model-file "" --knowledge-access-method memory_only --memory-key full_text \
+--search-query-generator-model-file zoo:blenderbot2/query_generator/model --search-query-generator-beam-min-length 2 \
+--save-after-valid True --vstep 1000 --lstep 100 --tstep 100000 -vp 5 \
+--init-model zoo:blenderbot2/blenderbot2_400M/model --dict-file zoo:blenderbot2/blenderbot2_400M/model.dict \
+--datatype train:stream  \
+--embeddings-scale True --variant prelayernorm --split-lines True --learn-positional-embeddings True \
+--n-layers 12 --embedding-size 1024 --ffn-size 4096 --n-heads 16 --n-decoder-layers 12 \
+--dict-tokenizer gpt2 --generation-model bart \
+--query-model bert_from_parlai_rag \
+--rag-model-type token --rag-retriever-type search_engine --search_server None \
+--dpr-model-file zoo:hallucination/bart_rag_token/model \
+--gold-document-titles-key select-docs-titles --insert-gold-docs True \
+--beam-min-length 20 --beam-context-block-ngram 3 --beam-block-ngram 3 --beam-block-full-context False --beam-size 10 \
+--inference beam --optimizer mem_eff_adam --learningrate 1e-05 --lr-scheduler-patience 1 --model-parallel True \
+--batchsize 1 \
+--truncate 512 --text-truncate 512 --label-truncate 128 \
+--dropout 0.0 --attention-dropout 0.0 \
+--min-doc-token-length 64 --max-doc-token-length 256 \
+--fp16 True --fp16-impl mem_efficient --force-fp16-tokens True \
+--tensorboard-log true --model-file projects/bb2am_kg/bb2_model/model \
+--eval-batchsize 1 --skip-generation true \
+--vmt ppl --vmm min

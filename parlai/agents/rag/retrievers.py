@@ -41,6 +41,8 @@ from parlai.utils.torch import padded_tensor
 from parlai.utils.typing import TShared
 from parlai.utils.io import PathManager
 
+from pykg2vec.data.kgcontroller import KnowledgeGraph
+
 from parlai.agents.rag.dpr import DprQueryEncoder
 from parlai.agents.rag.polyfaiss import RagDropoutPolyWrapper
 from parlai.agents.rag.indexers import DenseHNSWFlatIndexer, indexer_factory
@@ -235,36 +237,34 @@ class RagRetrieverTokenizer:
         self,
         datapath: str,
         query_model: str,
-        dictionary: DictionaryAgent,
+        knowledge_graph: KnowledgeGraph,  # Replace with knowledge graph
         max_length: int = 256,
         delimiter='\n',
     ):
         """
         :param query_model:
             query model type (e.g. bert)
-        :param dictionary:
-            ParlAI dictionary agent
-        :param fast:
-            whether to instantiate fast BertTokenizer
+        :param knowledge_graph:
+            Knowledge graph object
         :param max_length:
             maximum length of encoding.
         """
         self.datapath = datapath
         self.query_model = query_model
-        self.tokenizer = self._init_tokenizer(dictionary)
+        self.tokenizer = self._init_tokenizer(knowledge_graph)
         self.max_length = max_length
         self._delimiter = delimiter
 
     def _init_tokenizer(
-        self, dictionary: DictionaryAgent
-    ) -> Union[BertTokenizer, DictionaryAgent]:
+        self, knowledge_graph: KnowledgeGraph
+    ) -> Union[BertTokenizer, KnowledgeGraph]:
         """
         If a regular parlai model, use the regular dictionary.
 
         Otherwise, build as necessary
 
-        :param dictionary:
-            ParlAI dictionary agent
+        :param knowledge_graph:
+            Knowledge graph object
         """
         if self.query_model in ['bert', 'bert_from_parlai_rag']:
             try:
@@ -275,7 +275,7 @@ class RagRetrieverTokenizer:
                 )
                 return transformers.BertTokenizer.from_pretrained(vocab_path)
         else:
-            return dictionary
+            return knowledge_graph
 
     def get_pad_idx(self) -> int:
         """
@@ -336,7 +336,8 @@ class RagRetrieverTokenizer:
                 truncation='longest_first',
             )
         else:
-            return self.tokenizer.txt2vec(txt)
+            # Implement encoding using knowledge graph
+            return knowledge_graph.encode(txt)
 
     def decode(self, vec: torch.LongTensor) -> str:
         """
@@ -347,17 +348,8 @@ class RagRetrieverTokenizer:
                 clean_vec(vec, self.get_eos_idx()), skip_special_tokens=True
             )
         else:
-            return self.tokenizer.vec2txt(
-                clean_vec(
-                    vec,
-                    self.get_eos_idx(),
-                    special_toks=[
-                        self.get_pad_idx(),
-                        self.get_bos_idx(),
-                        self.get_eos_idx(),
-                    ],
-                )
-            )
+            # Implement decoding using knowledge graph
+            return knowledge_graph.decode(vec)
 
 
 class RagRetriever(torch.nn.Module, ABC):
@@ -367,7 +359,7 @@ class RagRetriever(torch.nn.Module, ABC):
     Provides an interface to the RagModel for retrieving documents.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         super().__init__()
         self.retriever_type = RetrieverType(opt['rag_retriever_type'])
         if not (
@@ -389,11 +381,11 @@ class RagRetriever(torch.nn.Module, ABC):
         self.print_docs = opt.get('print_docs', False)
         self.max_doc_len = opt['max_doc_token_length']
         self.max_query_len = opt['rag_query_truncate'] or 1024
-        self.end_idx = dictionary[dictionary.end_token]
+        self.end_idx = knowledge_graph.end_token
         self._tokenizer = RagRetrieverTokenizer(
             datapath=opt['datapath'],
             query_model=opt['query_model'],
-            dictionary=dictionary,
+            knowledge_graph=knowledge_graph,
             delimiter=opt.get('delimiter', '\n') or '\n',
         )
         self.fp16 = (
@@ -513,8 +505,8 @@ class RagRetrieverReranker(RagRetriever, ABC):
     Trait that carries methods for Reranker-based retrievers.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
-        super().__init__(opt, dictionary, shared=shared)
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
+        super().__init__(opt, knowledge_graph, shared=shared)
         self.n_final_docs = opt['n_docs']
 
     @final
@@ -597,11 +589,11 @@ class DPRRetriever(RagRetriever):
     DPR Retriever.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared=None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared=None):
         """
         Initialize DPR Retriever.
         """
-        super().__init__(opt, dictionary, shared=shared)
+        super().__init__(opt, knowledge_graph, shared=shared)
         self.load_index(opt, shared)
         self.n_docs = opt['n_docs']
         self.query_encoder = DprQueryEncoder(
@@ -709,12 +701,12 @@ class TFIDFRetriever(RagRetriever):
     Use TFIDF to retrieve wikipedia documents.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         """
         Init a TFIDFRetrieverAgent.
         """
         opt['query_model'] = 'tfidf'
-        super().__init__(opt, dictionary, shared=shared)
+        super().__init__(opt, knowledge_graph, shared=shared)
         tfidf_opt = {
             'model': 'rag_tfidf_retriever',
             'model_file': (opt['tfidf_model_path']),
@@ -803,18 +795,18 @@ class DPRThenTorchReranker(RagRetrieverReranker, DPRRetriever, ABC):
     Handles some shared functionality.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         """
         Initialize DPR model.
 
         It is up to subclasses to initialize rerankers.
         """
-        RagRetrieverReranker.__init__(self, opt, dictionary, shared=shared)
+        RagRetrieverReranker.__init__(self, opt, knowledge_graph, shared=shared)
         self.dpr_num_docs = opt['dpr_num_docs']
         assert self.dpr_num_docs
         dpr_opt = copy.deepcopy(opt)
         dpr_opt['n_docs'] = self.dpr_num_docs
-        DPRRetriever.__init__(self, dpr_opt, dictionary, shared=shared)
+        DPRRetriever.__init__(self, dpr_opt, knowledge_graph, shared=shared)
 
     def get_reranker_opts(self, opt: Opt) -> Dict[str, Any]:
         """
@@ -880,7 +872,6 @@ class DPRThenTorchReranker(RagRetrieverReranker, DPRRetriever, ABC):
         """
         return DPRRetriever.retrieve_and_score(self, query)
 
-
 class DPRThenPolyRetriever(DPRThenTorchReranker):
     """
     2 Stage Retrieval with DPR and Poly-encoder.
@@ -889,12 +880,12 @@ class DPRThenPolyRetriever(DPRThenTorchReranker):
     2. Rescore docs with polyencoder
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         """
         Initialize a Poly-Encoder Agent.
         """
         # 1. Call super to init DPR
-        super().__init__(opt, dictionary, shared=shared)
+        super().__init__(opt, knowledge_graph, shared=shared)
 
         # 2. Poly-encoder
         self.polyencoder, self.poly_tokenizer = self._build_reranker(opt)
@@ -989,9 +980,9 @@ class PolyFaissRetriever(DPRThenPolyRetriever):
     encoder score to narrow down to K docs.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         assert opt['query_model'] == 'dropout_poly'
-        super().__init__(opt, dictionary, shared=shared)
+        super().__init__(opt, knowledge_graph, shared=shared)
         self.dropout_poly = RagDropoutPolyWrapper(opt)
         self.polyencoder = self.dropout_poly.model
 
@@ -1044,8 +1035,8 @@ NO_SEARCH_QUERY = 'no_passages_used'
 
 
 class SearchQueryRetriever(RagRetriever):
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared):
-        RagRetriever.__init__(self, opt, dictionary, shared=shared)
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared):
+        RagRetriever.__init__(self, opt, knowledge_graph, shared=shared)
         opt['skip_retrieval_token'] = NO_SEARCH_QUERY
         self.n_docs = opt['n_docs']
         self.len_chunk = opt['splitted_chunk_length']
@@ -1065,7 +1056,7 @@ class SearchQueryRetriever(RagRetriever):
             self.query_generator = self.init_search_query_generator(opt)
         else:
             self.query_generator = shared['query_generator']
-        self.dict = dictionary
+        self.knowledge_graph = knowledge_graph
         self.init_query_encoder(opt)
 
     def share(self) -> TShared:
@@ -1101,9 +1092,9 @@ class SearchQueryRetriever(RagRetriever):
             msg = Message({'text': t, 'episode_done': True})
             obs_list.append(self.query_generator.observe(msg))
             self.query_generator.reset()  # Erase the history
-        search_quries = [r['text'] for r in self.query_generator.batch_act(obs_list)]
-        logging.debug(f'Generated search queries {search_quries}')
-        return search_quries
+        search_queries = [r['text'] for r in self.query_generator.batch_act(obs_list)]
+        logging.debug(f'Generated search queries {search_queries}')
+        return search_queries
 
     def init_query_encoder(self, opt):
         if hasattr(self, 'query_encoder'):
@@ -1117,13 +1108,13 @@ class SearchQueryRetriever(RagRetriever):
         if self.doc_chunk_split_mode == 'word':
             return txt.split(' ')
         else:
-            return self.dict.txt2vec(txt)
+            return self.knowledge_graph.txt2vec(txt)
 
     def tokens2text(self, tokens: Union[List[int], List[str]]) -> str:
         if self.doc_chunk_split_mode == 'word':
             return ' '.join(tokens)
         else:
-            return self.dict.vec2txt(tokens)
+            return self.knowledge_graph.vec2txt(tokens)
 
     def pick_chunk(self, query: str, doc_title: str, doc_text: str, doc_url: str):
         """
@@ -1145,7 +1136,6 @@ class SearchQueryRetriever(RagRetriever):
             doc_chunks = self.tokens2text(tokens)
         return self.chunk_reranker.get_top_chunks(query, doc_title, doc_chunks, doc_url)
 
-
 class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
     """
     A retriever that uses a search engine server for retrieving documents.
@@ -1154,8 +1144,8 @@ class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
     to an external server for retrieving documents.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared):
-        super().__init__(opt, dictionary, shared)
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared):
+        super().__init__(opt, knowledge_graph, shared)
         if not shared:
             self.search_client = self.initiate_retriever_api(opt)
         else:
@@ -1198,14 +1188,14 @@ class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
         Retrieves relevant documents for the query (the conversation context). This
         method conducts three main steps that are flagged in the main code as well.
 
-        Step 1: generate search queries for the conversation context batch.This step
+        Step 1: generate search queries for the conversation context batch. This step
         uses the query generator model (self.query_generator).
 
-        Step 2: use the search client to retrieve documents.This step uses retrieval
-        API agent (self.search_client)
+        Step 2: use the search client to retrieve documents. This step uses retrieval
+        API agent (self.search_client).
 
         Step 3: generate the list of Document objects from the
-        retrieved content. Here if the documents too long, the code splits them and
+        retrieved content. Here if the documents are too long, the code splits them and
         chooses a chunk based on the selected `doc_chunks_ranker` in the opt.
         """
         # step 1
@@ -1225,8 +1215,7 @@ class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
                 remain_docs = self.n_docs - len(search_results)
                 search_results.extend(self._empty_docs(remain_docs))
             docs_i = []
-            scors_i = []
-            # Change this debug later
+            scores_i = []
             logging.debug(f'URLS:\n{self._display_urls(search_results)}')
             for i, doc in enumerate(search_results):
                 url = doc['url']
@@ -1248,10 +1237,10 @@ class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
                             docid=url, text=splt_content, title=f'{title}_{splt_id}'
                         )
                     )
-                    scors_i.append(self.rank_score(i))
+                    scores_i.append(self.rank_score(i))
             max_n_docs = max(max_n_docs, len(docs_i))
             top_docs.append(docs_i)
-            top_doc_scores.append(scors_i)
+            top_doc_scores.append(scores_i)
         # Pad with empty docs
         for i in range(len(top_docs)):
             n_empty = max_n_docs - len(top_docs[i])
@@ -1261,10 +1250,9 @@ class SearchQuerySearchEngineRetriever(SearchQueryRetriever):
         self.top_docs = top_docs
         return top_docs, torch.Tensor(top_doc_scores).to(query.device)
 
-
 class SearchQueryFAISSIndexRetriever(SearchQueryRetriever, DPRRetriever):
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared):
-        SearchQueryRetriever.__init__(self, opt, dictionary, shared=shared)
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared):
+        SearchQueryRetriever.__init__(self, opt, knowledge_graph, shared=shared)
         self.load_index(opt, shared)
 
     def share(self) -> TShared:
@@ -1278,10 +1266,10 @@ class SearchQueryFAISSIndexRetriever(SearchQueryRetriever, DPRRetriever):
         """
         Retrieves from the FAISS index using a search query.
 
-        This methods relies on the `retrieve_and_score` method in `RagRetriever`
-        ancestor class. It receive the query (conversation context) and generatess the
-        search term queries based on them. Then uses those search quries (instead of the
-        the query text itself) to retrieve from the FAISS index.
+        This method relies on the `retrieve_and_score` method in `RagRetriever`
+        ancestor class. It receives the query (conversation context) and generates the
+        search term queries based on them. Then uses those search queries (instead of the
+        query text itself) to retrieve from the FAISS index.
         """
 
         search_queries = self.generate_search_query(query)
@@ -1305,13 +1293,13 @@ class ObservationEchoRetriever(RagRetriever):
     the observed example of the agent.
     """
 
-    def __init__(self, opt: Opt, dictionary: DictionaryAgent, shared: TShared = None):
+    def __init__(self, opt: Opt, knowledge_graph: KnowledgeGraph, shared: TShared = None):
         self._delimiter = '\n'
         self.n_docs = opt['n_docs']
         self._query_ids = dict()
         self._saved_docs = dict()
         self._largest_seen_idx = -1
-        super().__init__(opt, dictionary, shared=shared)
+        super().__init__(opt, knowledge_graph, shared=shared)
 
     def add_retrieve_doc(self, query: str, retrieved_docs: List[Document]):
         self._largest_seen_idx += 1
@@ -1343,8 +1331,8 @@ class ObservationEchoRetriever(RagRetriever):
         batch_size = query.size(0)
 
         retrieved_docs = []
-        for endoded_query in query.tolist():
-            docs_retrieve_idx = endoded_query[0]
+        for encoded_query in query.tolist():
+            docs_retrieve_idx = encoded_query[0]
             retrieved_docs.append(self._saved_docs[docs_retrieve_idx])
 
         # Some arbitrary scoring of docs
@@ -1460,15 +1448,15 @@ class TfidfChunkRanker(DocumentChunkRanker):
 
 
 def retriever_factory(
-    opt: Opt, dictionary: DictionaryAgent, shared=None
+    opt: Opt, knowledge_graph: KnowledgeGraph, shared=None
 ) -> Optional[RagRetriever]:
     """
     Build retriever.
 
     :param opt:
         ParlAI Opt
-    :param dictionary:
-        dictionary agent
+    :param knowledge_graph:
+        knowledge graph object
     :param shared:
         shared objects.
 
@@ -1480,16 +1468,16 @@ def retriever_factory(
     # only build retriever when not converting a BART model
     retriever = RetrieverType(opt['rag_retriever_type'])
     if retriever is RetrieverType.DPR:
-        return DPRRetriever(opt, dictionary, shared=shared)
+        return DPRRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.TFIDF:
-        return TFIDFRetriever(opt, dictionary, shared=shared)
+        return TFIDFRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.DPR_THEN_POLY:
-        return DPRThenPolyRetriever(opt, dictionary, shared=shared)
+        return DPRThenPolyRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.POLY_FAISS:
-        return PolyFaissRetriever(opt, dictionary, shared=shared)
+        return PolyFaissRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.SEARCH_ENGINE:
-        return SearchQuerySearchEngineRetriever(opt, dictionary, shared=shared)
+        return SearchQuerySearchEngineRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.SEARCH_TERM_FAISS:
-        return SearchQueryFAISSIndexRetriever(opt, dictionary, shared=shared)
+        return SearchQueryFAISSIndexRetriever(opt, knowledge_graph, shared=shared)
     elif retriever is RetrieverType.OBSERVATION_ECHO_RETRIEVER:
-        return ObservationEchoRetriever(opt, dictionary, shared=shared)
+        return ObservationEchoRetriever(opt, knowledge_graph, shared=shared)
